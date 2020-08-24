@@ -76,7 +76,22 @@ def add_intrinsics_head(bottleneck, image_height, image_width):
     last_row = tf.tile([[[0.0, 0.0, 1.0]]], [batch_size, 1, 1])
     intrinsic_mat = tf.concat([intrinsic_mat, last_row], axis=1)
     return intrinsic_mat
-
+'''
+def add_Fmatrix_head(bottleneck, image_height, image_width):
+  #finsih the fmatrix function with EPS norm
+  with tf.variable_scope('fmatrix'):
+    fmatrix = tf.squeeze(
+        layers.conv2d(
+            bottleneck,
+            8, [1, 1],
+            stride=1,
+            activation_fn=tf.nn.softplus,
+            weights_regularizer=None,
+            scope='fm_entries'),
+        axis=(1, 2)) * tf.to_float(
+            tf.convert_to_tensor([[image_width, image_height]]))
+  return True
+'''
 
 def motion_field_net(images, weight_reg=0.0):
   """Predict object-motion vectors from a stack of frames or embeddings.
@@ -137,6 +152,8 @@ def motion_field_net(images, weight_reg=0.0):
 
       image_height, image_width = tf.unstack(tf.shape(images)[1:3])
       intrinsic_mat = add_intrinsics_head(bottleneck, image_height, image_width)
+      # add a function add_Fmatrix_head(bottleneck, image_height, image_width)
+      # return also the above found Fmatrix
 
       return (rotation, translation, residual_translation, intrinsic_mat)
 

@@ -20,9 +20,13 @@ from __future__ import division
 from __future__ import print_function
 
 import tensorflow as tf  # tf
+#tf.enable_eager_execution()
+import numpy as np
+import cv2
+#
 
 from depth_from_video_in_the_wild import transform_utils
-
+#sift = cv2.xfeatures2d.SIFT_create()
 
 def rgbd_consistency_loss(frame1transformed_depth, frame1rgb, frame2depth,
                           frame2rgb):
@@ -200,9 +204,83 @@ def motion_field_consistency_loss(frame1transformed_pixelxy, mask,
   }
 
 
+def sift_get_fmat(img1, img2, total=100, ratio = 0.8, algo=cv2.FM_LMEDS,
+                  random = False, display = False):
+    # find the keypoints and descriptors with SIFT
+    kp1, des1 = sift.detectAndCompute(img1,None)
+    kp2, des2 = sift.detectAndCompute(img2,None)
+
+    # FLANN parameters
+    FLANN_INDEX_KDTREE = 0
+    index_params  = dict(algorithm = FLANN_INDEX_KDTREE, trees = 5)
+    search_params = dict(checks=50)
+
+    flann = cv2.FlannBasedMatcher(index_params,search_params)
+    matches = flann.knnMatch(des1,des2,k=2)
+
+    good = []
+    pts1 = []
+    pts2 = []
+
+    # ratio test as per Lowe's paper
+    for i,(m,n) in enumerate(matches):
+        if m.distance < ratio * n.distance:
+            good.append(m)
+
+    sorted_good_mat = sorted(good, key=lambda m: m.distance)
+    for m in sorted_good_mat:
+        pts2.append(kp2[m.trainIdx].pt)
+        pts1.append(kp1[m.queryIdx].pt)
+
+    pts1 = np.float32(pts1)
+    pts2 = np.float32(pts2)
+    print ('pts size: ', pts1.size)
+    assert pts1.size > 2 and pts2.size > 2
+    F, mask = cv2.findFundamentalMat(pts1,pts2,algo)
+    if mask is None or np.linalg.matrix_rank(F) != 2:
+        return None, None, None
+    # assert np.linalg.matrix_rank(F) == 2
+
+    # We select only inlier points
+    pts1 = pts1[mask.ravel()==1]
+    pts2 = pts2[mask.ravel()==1]
+
+    if random:
+        # Randomly sample top-[total] number of points
+        pts = random.sample(zip(pts1, pts2), min(len(pts1), total))
+        pts1, pts2 = np.array([ p for p, _ in pts ]), \
+                     np.array([ p for _, p in pts ])
+    else:
+        pts1 = pts1[:min(len(pts1), total)]
+        pts2 = pts2[:min(len(pts1), total)]
+
+    if display:
+        draw_matches(img1,pts1,img2,pts2,good)
+
+    return F, pts1, pts2
+
+def Fmat_consistency_loss(F_gt,K,R,t):
+    #F_gt = tf.convert_to_tensor(F_gt)
+    #rotation1field = tf.broadcast_to( _expand_dims_twice(rotation1, -2), tf.shape(translation1))
+    #rotation1matrix = transform_utils.matrix_from_angles(rotation1field)
+    tx,ty,tz = t[0,0,0,0],t[0,0,0,1],t[0,0,0,2]
+    T = tf.convert_to_tensor([[0, -tz, ty],[tz, 0, -tx],[-ty, tx, 0]])
+    #print(T)
+    #print(tf.matmul(T,tf.linalg.inv(K)))
+    #pred_F = tf.convert_to_tensor(np.linalg.inv(K2.T).dot(R.dot(T.dot(np.linalg.inv(K1)))))
+    print("k : {}".format(K))
+    print("R : {}".format(R))
+    print("T : {}".format(T))
+    pred_F = tf.matmul(tf.linalg.inv(tf.transpose(K)),tf.matmul(R,tf.matmul(T,tf.linalg.inv(K))))
+    Fmat_error = tf.reduce_mean(tf.square(F_gt - pred_F))
+    return {'Fmat_error': Fmat_error}
+
+
+# add Fmat_consistency loss that returns endpoints {return {'Fmat_error':Fmat_error}}
+
 def rgbd_and_motion_consistency_loss(frame1transformed_depth, frame1rgb,
                                      frame2depth, frame2rgb, rotation1,
-                                     translation1, rotation2, translation2):
+                                     translation1, rotation2, translation2,intrinsic_mat,F_gt1,F_gt2,i):
   """A helper that bundles rgbd and motion consistency losses together."""
   endpoints = rgbd_consistency_loss(frame1transformed_depth, frame1rgb,
                                     frame2depth, frame2rgb)
@@ -212,6 +290,23 @@ def rgbd_and_motion_consistency_loss(frame1transformed_depth, frame1rgb,
   endpoints.update(motion_field_consistency_loss(
       frame1transformed_depth.pixel_xy, endpoints['frame1_closer_to_camera'],
       rotation1, translation1, rotation2, translation2))
+  #temp1 = tf.get_default_graph().get_tensor_by_name("compute_loss/strided_slice_29:0")
+  #temp2 = tf.get_default_graph().get_tensor_by_name("compute_loss/strided_slice_30:0")
+  #F_gt,_,_= sift_get_fmat(frame1, frame2, total=100, ratio = 0.8, algo=cv2.FM_LMEDS, random = False, display = False)    
+  
+  print("flagging")
+  #F_gt = tf.placeholder(np.float32,shape=(3,3))
+  rot1_matrix = transform_utils.matrix_from_angles(rotation1)
+  #endpoints.update(Fmat_consistency_loss(F_gt,intrinsic_mat[0,:,:],rot1_matrix[0,:,:],translation1))
+  #sess1.close()
+  #print(flag4)
+  #F_gt1 = tf.placeholder('float',shape = (3,3),name='F_gt1')
+  #print('F_gt1 {}'.format(F_gt1))
+  #F_gt2 = tf.placeholder('float',shape = (3,3),name='F_gt2')
+  if i==0:
+   endpoints.update(Fmat_consistency_loss(F_gt1,intrinsic_mat[0,:,:],rot1_matrix[0,:,:],translation1))
+  else :
+   endpoints.update(Fmat_consistency_loss(F_gt2,intrinsic_mat[0,:,:],rot1_matrix[0,:,:],translation1))
   return endpoints
 
 

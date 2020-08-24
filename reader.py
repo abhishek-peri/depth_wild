@@ -71,11 +71,14 @@ class DataReader(object):
       with tf.name_scope('enqueue_paths'):
         seed = random.randint(0, 2**31 - 1)
         self.file_lists = self.compile_file_list(self.data_dir, self.input_file)
+        new_img = tf.data.Dataset.from_tensor_slices(self.file_lists['image_file_list'])
+        print("new_img {}".format(new_img))
         image_paths_queue = tf.train.string_input_producer(
             self.file_lists['image_file_list'], seed=seed,
             shuffle=self.shuffle,
             num_epochs=(1 if not self.shuffle else None)
         )
+        print("imag_path_q {}".format(image_paths_queue))
         seg_paths_queue = tf.train.string_input_producer(
             self.file_lists['segment_file_list'], seed=seed,
             shuffle=self.shuffle,

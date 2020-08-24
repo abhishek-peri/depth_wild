@@ -34,9 +34,10 @@ import cv2
 
 
 WAIT_TIME = 20  # Wait time in seconds before checking for new checkpoint.
-NUM_THREADS = 16  # Number of threads in which eval is calculated.
+NUM_THREADS = 8  # Number of threads in which eval is calculated.
 
-ODOMETRY_SETS = ['09-image_2', '10-image_2']
+#ODOMETRY_SETS = ['09-image_3', '10-image_3']
+ODOMETRY_SETS = ['09_3', '10_3']
 
 
 flags.DEFINE_string('output_dir', None, 'Directory to store predictions. '
@@ -82,10 +83,9 @@ def trajectory_inference():
 def get_egomotion(im_files, results, infer_egomotion):
   for im_file in im_files:
     im = load_image(im_file)
+    print('{} size: {}'.format(im_file,np.shape(im[:, FLAGS.img_width:2 * FLAGS.img_width, :])))
     # Each image is a sequence of 3 frames. We use only the first 2.
-    rot, trans = infer_egomotion(
-        [im[:, :FLAGS.img_width, :]],
-        [im[:, FLAGS.img_width:2 * FLAGS.img_width, :]])
+    rot, trans = infer_egomotion([im[:, :FLAGS.img_width, :]],[im[:, FLAGS.img_width:2 * FLAGS.img_width, :]])
     results[im_file] = (rot, trans)
 
 
@@ -106,6 +106,7 @@ def odometry_inference(image_sequence_dir, output_file, infer_egomotion):
       if 'png' in f and 'seg' not in f
   ]
   num_images = len(im_files)
+  print(num_images)
 
   # Divide the work to NUM_THREADS threads
   results = [None] * NUM_THREADS
@@ -147,6 +148,9 @@ def odometry_inference(image_sequence_dir, output_file, infer_egomotion):
       orientation = orientation.dot(rot[0])
       position += orientation.dot(trans[0])
       f.write(' '.join([str(p) for p in position]) + '\n')
+    #with tf.gfile.Open(output_file, 'w') as f1:  
+      #location = squeeze orientation and position for a (3,4 matrix)
+      #f1.write(' '.join([str(l) for l in location]) + '\n')
 
 
 def _logger(total_images, processed_images):

@@ -38,9 +38,7 @@ A command line for running a single training step on the single example in
 `data_example` (for testing):
 
 ```bash
-python -m depth_from_video_in_the_wild.train \
-  --data_dir=depth_from_video_in_the_wild/data_example \
-  --checkpoint_dir=/tmp/my_experiment --train_steps=1
+python -m depth_from_video_in_the_wild.train --data_dir=depth_from_video_in_the_wild/data_example --checkpoint_dir=/tmp/my_experiment --train_steps=1
 ```
 
 To use the given intrinsics instead of learning them, add

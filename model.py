@@ -25,6 +25,7 @@ from __future__ import print_function
 from absl import logging
 
 import tensorflow as tf
+#tf.enable_eager_execution()
 from depth_from_video_in_the_wild import consistency_losses
 from depth_from_video_in_the_wild import depth_prediction_net
 from depth_from_video_in_the_wild import motion_prediction_net
@@ -63,7 +64,7 @@ class Model(object):
                reconstr_weight=0.85,
                smooth_weight=1e-2,
                ssim_weight=3.0,
-               batch_size=4,
+               batch_size=1,
                img_height=128,
                img_width=416,
                imagenet_norm=True,
@@ -71,6 +72,8 @@ class Model(object):
                random_scale_crop=False,
                random_color=True,
                shuffle=True,
+               #sess = None,
+               Fmat_flag=True,
                input_file='train',
                depth_consistency_loss_weight=1e-2,
                queue_size=2000,
@@ -121,6 +124,7 @@ class Model(object):
         v.op.name[len(DEPTH_SCOPE) + 1:]: v for v in vars_to_restore
     }
     self.imagenet_init_restorer = tf.train.Saver(vars_to_restore)
+    #self.run_image_op()
     self._build_train_op()
     self._build_summaries()
 
@@ -137,7 +141,7 @@ class Model(object):
         self.random_scale_crop,
         reader.FLIP_RANDOM,
         self.random_color,
-        self.imagenet_norm,
+	self.imagenet_norm,
         self.shuffle,
         self.input_file,
         queue_size=self.queue_size)
@@ -151,7 +155,8 @@ class Model(object):
                          'learn_intrinsics on to learn it instead of loading '
                          'it.')
     self.export('self.image_stack', self.image_stack)
-
+    #print(self.image_stack)
+    #print(swag)
     object_masks = []
     for i in range(self.batch_size):
       object_ids = tf.unique(tf.reshape(self.seg_stack[i], [-1]))[0]
@@ -181,7 +186,7 @@ class Model(object):
 
     self.seg_stack = tf.to_float(tf.stack(object_masks, axis=0))
     tf.summary.image('Masks', self.seg_stack)
-
+    #print("flag1")
     with tf.variable_scope(DEPTH_SCOPE):
       # Organized by ...[i][scale].  Note that the order is flipped in
       # variables in build_loss() below.
@@ -208,12 +213,19 @@ class Model(object):
               image, True, self.weight_reg, _normalizer_fn)
           self.disp[i] = 1.0 / self.depth[i]
 
+    self.frame1 = self.image_stack[:, :, :, 0:3]
+    self.frame2 = self.image_stack[:, :, :, 3:6]
+    self.frame3 = self.image_stack[:, :, :, 6:9]
     with tf.name_scope('compute_loss'):
       self.reconstr_loss = 0
       self.smooth_loss = 0
       self.ssim_loss = 0
       self.depth_consistency_loss = 0
-
+      self.Fmat_loss = 0.0
+      F_gt1 = tf.placeholder('float',shape = (3,3),name='F_gt1')
+      #print('F_gt1 {}'.format(F_gt1))
+      F_gt2 = tf.placeholder('float',shape = (3,3),name='F_gt2')
+      #print("flag2")
       # Smoothness.
       if self.smooth_weight > 0:
         for i in range(SEQ_LENGTH):
@@ -238,15 +250,20 @@ class Model(object):
         self.ssim_loss += 0.5 * endpoints['ssim_error']
         self.rot_loss += endpoints['rotation_error']
         self.trans_loss += endpoints['translation_error']
-
+        self.Fmat_loss += endpoints['Fmat_error']
+      #print("flag3")
       self.motion_smoothing = 0.0
       with tf.variable_scope(tf.get_variable_scope(), reuse=tf.AUTO_REUSE):
+        #self.frame1 = self.image_stack[:, :, :, 0:3]
+        #self.frame2 = self.image_stack[:, :, :, 3:6]
+        #self.frame3 = self.image_stack[:, :, :, 6:9]
         for i in range(SEQ_LENGTH - 1):
           j = i + 1
           depth_i = self.depth[i][:, :, :, 0]
           depth_j = self.depth[j][:, :, :, 0]
           image_j = self.image_stack[:, :, :, 3 * j:3 * (j + 1)]
           image_i = self.image_stack[:, :, :, i*3:(i+1)*3]
+          self.left_image = image_i
           # We select a pair of consecutive images (and their respective
           # predicted depth maps). Now we have the network predict a motion
           # field that connects the two. We feed the pair of images into the
@@ -257,6 +274,7 @@ class Model(object):
           # - Cycle consistency of rotations and translations for every pixel.
           # - L1 smoothness of the disparity and the motion field.
           # - Depth consistency
+          # TODO : add Fmat_loss to the total_loss
           rot, trans, trans_res, mat = motion_prediction_net.motion_field_net(
               images=tf.concat([image_i, image_j], axis=-1),
               weight_reg=self.weight_reg)
@@ -267,8 +285,11 @@ class Model(object):
 
           if self.learn_intrinsics:
             intrinsic_mat = 0.5 * (mat + inv_mat)
+            # self.export['intrinsics',intrinsic_mat]
           else:
             intrinsic_mat = self.intrinsic_mat[:, 0, :, :]
+
+          # self.Fmat_loss = L2(F_gt,inv_mat^(-T)*rot*[trans]x*mat^(-1))
 
           def dilate(x):
             # Dilation by n pixels is roughtly max pooling by 2 * n + 1.
@@ -276,7 +297,9 @@ class Model(object):
             return tf.nn.max_pool(x, [1, p, p, 1], [1]*4, 'SAME')
 
           trans += trans_res * dilate(self.seg_stack[:, :, :, j:j + 1])
+          #trans += trans_res
           inv_trans += inv_trans_res * dilate(self.seg_stack[:, :, :, i:i + 1])
+          #inv_trans += inv_trans_res 
 
           tf.summary.image('trans%d%d' % (i, i+1), trans)
           tf.summary.image('trans%d%d' % (i+1, i), inv_trans)
@@ -297,7 +320,7 @@ class Model(object):
           add_result_to_loss_and_summaries(
               consistency_losses.rgbd_and_motion_consistency_loss(
                   transformed_depth_j, image_j, depth_i, image_i, rot,
-                  trans, inv_rot, inv_trans), i, j)
+                  trans, inv_rot, inv_trans,intrinsic_mat,F_gt1,F_gt2,i), i, j)
 
           transformed_depth_i = transform_depth_map.using_motion_vector(
               depth_i, inv_trans, inv_rot, intrinsic_mat)
@@ -305,7 +328,9 @@ class Model(object):
           add_result_to_loss_and_summaries(
               consistency_losses.rgbd_and_motion_consistency_loss(
                   transformed_depth_i, image_i, depth_j, image_j, inv_rot,
-                  inv_trans, rot, trans), j, i)
+                  inv_trans, rot, trans,intrinsic_mat,F_gt1,F_gt2,i), j, i)
+          #print("flag4")
+          #add_result_to_loss_and_summaries(consistency_losses.rgbd_and_motion_consistency_loss(transformed_depth_i, image_i, depth_j, image_j, inv_rot,inv_trans, rot, trans,intrinsic_mat), j, i)
 
       # Build the total loss as composed of L1 reconstruction, SSIM, smoothing
       # and object size constraint loss as appropriate.
@@ -331,6 +356,10 @@ class Model(object):
         self.total_loss += self.depth_consistency_loss
         self.export('self.depth_consistency_loss', self.depth_consistency_loss)
 
+      if self.Fmat_flag:
+        self.total_loss += self.Fmat_loss
+        self.export('self.Fmat_loss',self.Fmat_loss)  
+
       self.rot_loss *= self.rotation_consistency_weight
       self.trans_loss *= self.translation_consistency_weight
       self.export('rot_loss', self.rot_loss)
@@ -341,6 +370,9 @@ class Model(object):
 
       self.export('self.total_loss', self.total_loss)
 
+  #def run_image_op(self):
+   # return self.image_stack
+ 
   def _build_train_op(self):
     with tf.name_scope('train_op'):
       optim = tf.train.AdamOptimizer(self.learning_rate, self.beta1)
@@ -357,6 +389,8 @@ class Model(object):
       tf.summary.scalar('ssim_loss', self.ssim_loss)
     if self.motion_smoothing_weight > 0:
       tf.summary.scalar('motion_smoothing', self.motion_smoothing)
+    if self.Fmat_flag:
+      tf.summary.scalar('Fmat_loss', self.Fmat_loss)
 
     tf.summary.scalar('rotation_consistency_loss', self.rot_loss)
     tf.summary.scalar('translation_consistency_loss', self.trans_loss)
@@ -410,11 +444,12 @@ class Model(object):
           name='image2')
       # The "compute_loss" scope is needed for the checkpoint to load properly.
       with tf.name_scope('compute_loss'):
-        rot, trans, _, _ = motion_prediction_net.motion_field_net(
+        rot, trans, trans_res,mat = motion_prediction_net.motion_field_net(
             images=tf.concat([self._image1, self._image2], axis=-1))
-        inv_rot, inv_trans, _, _ = (
+        inv_rot, inv_trans, inv_trans_res, inv_mat = (
             motion_prediction_net.motion_field_net(
                 images=tf.concat([self._image2, self._image1], axis=-1)))
+        
 
       rot = transform_utils.matrix_from_angles(rot)
       inv_rot = transform_utils.matrix_from_angles(inv_rot)
@@ -428,8 +463,10 @@ class Model(object):
       # to get a better estimator. TODO(gariel): Check if there's an estimator
       # with less variance.
       self.rot = 0.5 * (tf.linalg.inv(inv_rot) + rot)
+      self.mat = 0.5 * (mat + inv_mat)
       self.trans = 0.5 * (-tf.squeeze(
           tf.matmul(self.rot, tf.expand_dims(inv_trans, -1)), axis=-1) + trans)
+      #self.fmat = tf.matmul(tf.matmul(self.mat, self.rot),inv_mat)
 
   def inference_egomotion(self, image1, image2, sess):
     return sess.run([self.rot, self.trans],

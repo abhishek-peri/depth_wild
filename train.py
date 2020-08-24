@@ -29,9 +29,12 @@ from absl import flags
 from absl import logging
 import numpy as np
 import tensorflow as tf
-
+#tf.enable_eager_execution()
 from depth_from_video_in_the_wild import model
+import cv2
 
+
+sift = cv2.xfeatures2d.SIFT_create()
 gfile = tf.gfile
 MAX_TO_KEEP = 1000000  # Maximum number of checkpoints to keep.
 
@@ -50,7 +53,7 @@ flags.DEFINE_float('smooth_weight', 1e-2, 'Smoothness loss weight.')
 flags.DEFINE_float('depth_consistency_loss_weight', 0.01,
                    'Depth consistency loss weight')
 
-flags.DEFINE_integer('batch_size', 4, 'The size of a sample batch')
+flags.DEFINE_integer('batch_size', 1, 'The size of a sample batch')
 
 flags.DEFINE_integer('img_height', 128, 'Input frame height.')
 
@@ -114,6 +117,60 @@ def _print_losses(dir1):
       t1 = load(f1).astype(float)
       print (t1)
 
+def sift_get_fmat(img1, img2, total=100, ratio = 0.8, algo=cv2.FM_LMEDS,
+                  random = False, display = False):
+    # find the keypoints and descriptors with SIFT
+    kp1, des1 = sift.detectAndCompute(img1,None)
+    kp2, des2 = sift.detectAndCompute(img2,None)
+
+    # FLANN parameters
+    FLANN_INDEX_KDTREE = 0
+    index_params  = dict(algorithm = FLANN_INDEX_KDTREE, trees = 5)
+    search_params = dict(checks=50)
+    #print('kp1.size: {} '.format(len(kp1)))
+    flann = cv2.FlannBasedMatcher(index_params,search_params)
+    matches = flann.knnMatch(des1,des2,k=2)
+
+    good = []
+    pts1 = []
+    pts2 = []
+
+    # ratio test as per Lowe's paper
+    for i,(m,n) in enumerate(matches):
+        if m.distance < ratio * n.distance:
+            good.append(m)
+
+    sorted_good_mat = sorted(good, key=lambda m: m.distance)
+    for m in sorted_good_mat:
+        pts2.append(kp2[m.trainIdx].pt)
+        pts1.append(kp1[m.queryIdx].pt)
+
+    pts1 = np.float32(pts1)
+    pts2 = np.float32(pts2)
+    #print ('pts size: ', pts1.size)
+    assert pts1.size > 2 and pts2.size > 2
+    F, mask = cv2.findFundamentalMat(pts1,pts2,algo)
+    if mask is None or np.linalg.matrix_rank(F) != 2:
+        return None, None, None
+    # assert np.linalg.matrix_rank(F) == 2
+
+    # We select only inlier points
+    pts1 = pts1[mask.ravel()==1]
+    pts2 = pts2[mask.ravel()==1]
+
+    if random:
+        # Randomly sample top-[total] number of points
+        pts = random.sample(zip(pts1, pts2), min(len(pts1), total))
+        pts1, pts2 = np.array([ p for p, _ in pts ]), \
+                     np.array([ p for _, p in pts ])
+    else:
+        pts1 = pts1[:min(len(pts1), total)]
+        pts2 = pts2[:min(len(pts1), total)]
+
+    if display:
+        draw_matches(img1,pts1,img2,pts2,good)
+
+    return F, pts1, pts2
 
 def main(_):
   # Fixed seed for repeatability
@@ -175,7 +232,18 @@ def _train(train_model, checkpoint_dir, train_steps, summary_freq):
     last_summary_time = time.time()
     steps_per_epoch = train_model.reader.steps_per_epoch
     step = 1
+    #train_model.sess = sess
+    #print(train_model.sess)
+    #print(flaggni)
+    print(np.shape(sess.run(train_model.image_stack)))
+    #print(swag)
     while step <= train_steps:
+      temp_fetch = {
+          'frame1' : train_model.frame1,
+          'frame2' : train_model.frame2,
+          'frame3' : train_model.frame3,
+          'left_image': train_model.left_image,
+      }
       fetches = {
           'train': train_model.train_op,
           'global_step': train_model.global_step,
@@ -187,9 +255,26 @@ def _train(train_model, checkpoint_dir, train_steps, summary_freq):
       if FLAGS.debug:
         fetches.update(train_model.exports)
 
-      results = sess.run(fetches)
+      result_img = sess.run(temp_fetch)
+      #print(255*(result_img['left_image'][0,:,:,:]))
+      #print(np.shape(result_img['frame1'][0,:,:,:]))
+      #print(np.shape(result_img['frame2'][0,:,:,:]))
+      #print(np.shape(result_img['frame3'][0,:,:,:]))
+      #print(swag)
+      image_1 = cv2.cvtColor((256*result_img['frame1'][0,:,:,:]).astype('uint8'), cv2.COLOR_BGR2GRAY)
+      image_2 = cv2.cvtColor((256*result_img['frame2'][0,:,:,:]).astype('uint8'), cv2.COLOR_BGR2GRAY) 
+      image_3 = cv2.cvtColor((256*result_img['frame3'][0,:,:,:]).astype('uint8'), cv2.COLOR_BGR2GRAY)
+      F_gt1 = tf.get_default_graph().get_tensor_by_name("compute_loss/F_gt1:0")
+      F_gt2 = tf.get_default_graph().get_tensor_by_name("compute_loss/F_gt2:0")
+      #print(np.shape(image_1))
+      #print(image_2)
+      F1,_,_ = sift_get_fmat(image_1, image_2, total=100, ratio = 0.8, algo=cv2.FM_LMEDS, random= False, display = False)
+      F2,_,_ = sift_get_fmat(image_2, image_3, total=100, ratio = 0.8, algo=cv2.FM_LMEDS, random= False, display = False)
+      #results = sess.run(fetches)
+      if not(F1 is None) and not(F2 is None):
+        results = sess.run(fetches, feed_dict = {F_gt1 : F1, F_gt2 : F2})
       global_step = results['global_step']
-
+      print('global_step {}'.format(global_step))
       if step % summary_freq == 0:
         sv.summary_writer.add_summary(results['summary'], global_step)
         train_epoch = math.ceil(global_step / steps_per_epoch)
